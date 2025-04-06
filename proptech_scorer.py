@@ -40,7 +40,7 @@ def check_data_file_lists(submission_annotations, gold_annotations, task_name="t
     #checking that the number of articles for which the user has submitted annotations is correct
     if len(gold_annotations.keys()) < len(submission_annotations.keys()):
         logger.error("The number of articles in the submission, %d, is greater than the number of articles in the "
-                     "reference dataset" % (len(submission_annotations.keys()), len(gold_annotations.keys()))); sys.exit()
+             "reference dataset (%d)." % (len(submission_annotations.keys()), len(gold_annotations.keys()))); sys.exit()
     # logger.debug("OK: number of articles in the submission for %s is the same as the one in the gold file: %d"
     #              % (task_name, len(gold_annotations.keys())))
 
@@ -68,9 +68,12 @@ def load_technique_names_from_file(filename=TECHNIQUE_NAMES_FILE):
 
 
 def extract_article_id_from_file_name(fullpathfilename):
-
-    regex = re.compile("article([0-9]+).*")
-    return regex.match(os.path.basename(fullpathfilename)).group(1)
+    regex = re.compile(r"article(\d+)\.labels\.tsv")
+    match = regex.match(os.path.basename(fullpathfilename))
+    if match:
+        return match.group(1)
+    else:
+        raise ValueError(f"Filename {fullpathfilename} doesn't match expected format.")
 
 
 def print_annotations(annotation_list):
@@ -463,24 +466,27 @@ def compute_prec_rec_f1(prec_numerator, prec_denominator, rec_numerator, rec_den
 
 
 def load_annotation_list_from_folder(folder_name, techniques_names):
-
-    file_list = glob.glob(os.path.join(folder_name, "*.task3.labels"))
-    if len(file_list)==0:
-        logger.error("Cannot load file list in folder " + folder_name);
+    file_list = glob.glob(os.path.join(folder_name, "article*.labels.tsv"))
+    if len(file_list) == 0:
+        logger.error("Cannot load file list in folder " + folder_name)
         sys.exit()
+
     annotations = {}
     for filename in file_list:
-        annotations[extract_article_id_from_file_name(filename)] = []
+        article_id = extract_article_id_from_file_name(filename)
+        if not article_id:
+            logger.warning(f"Skipping unrecognized file format: {filename}")
+            continue
+
+        annotations[article_id] = []
         with open(filename, "r") as f:
             for row_number, line in enumerate(f.readlines()):
                 row = line.rstrip().split("\t")
                 check_format_of_annotation_in_file(row, row_number, techniques_names, filename)
-                # annotations[row[TASK_3_ARTICLE_ID_COL]].append([ row[TASK_3_TECHNIQUE_NAME_COL],
-                #                                                  row[TASK_3_FRAGMENT_START_COL],
-                #                                                  row[TASK_3_FRAGMENT_END_COL] ])
-                annotations[row[TASK_3_ARTICLE_ID_COL]].append([row[TASK_3_TECHNIQUE_NAME_COL],
-                                                                set(range(int(row[TASK_3_FRAGMENT_START_COL]),
-                                                                          int(row[TASK_3_FRAGMENT_END_COL])))])
+                annotations[row[TASK_3_ARTICLE_ID_COL]].append([
+                    row[TASK_3_TECHNIQUE_NAME_COL],
+                    set(range(int(row[TASK_3_FRAGMENT_START_COL]), int(row[TASK_3_FRAGMENT_END_COL])))
+                ])
     return annotations
 
 
