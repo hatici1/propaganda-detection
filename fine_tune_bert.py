@@ -1,10 +1,14 @@
+# ✅ fine_tune_bert.py (improved version)
 import os
 import pandas as pd
-from transformers import BertTokenizerFast, BertForSequenceClassification, Trainer, TrainingArguments
+from transformers import BertTokenizerFast, Trainer, TrainingArguments, BertConfig
 from datasets import Dataset
 import torch
+import numpy as np
+from sklearn.utils.class_weight import compute_class_weight
+from my_model2 import CustomBertForTokenClassification
 
-# ✅ Load train/dev from official folders (span-level classification)
+# ✅ Load train/dev from official folders
 def load_data_from_folder(folder_path):
     data = []
     for fname in os.listdir(folder_path):
@@ -23,59 +27,83 @@ def load_data_from_folder(folder_path):
                 for line in f:
                     parts = line.strip().split("\t")
                     if len(parts) == 4:
-                        aid, label, start, end = parts
+                        _, label, start, end = parts
                         start, end = int(start), int(end)
-                        text = full_text[start:end]
                         data.append({
-                            "article_id": article_id,
-                            "technique": label,
+                            "full_text": full_text,
+                            "label": label,
                             "start": start,
-                            "end": end,
-                            "text": text,
-                            "full_text": full_text
+                            "end": end
                         })
     return pd.DataFrame(data)
 
-print("📂 Loading training and development data from official folders...")
+print("\U0001F4C2 Loading training and development data from official folders...")
 train_df = load_data_from_folder("train")
 dev_df = load_data_from_folder("dev")
 print(f"✅ Loaded {len(train_df)} training and {len(dev_df)} development samples.")
 
-# 🔢 Encode labels
-label_list = sorted(set(train_df['technique'].unique()).union(set(dev_df['technique'].unique())))
+# 🔢 Labels
+label_list = sorted(set(train_df["label"]).union(dev_df["label"]))
+label_list = ["O"] + label_list
 label_to_id = {label: i for i, label in enumerate(label_list)}
 id_to_label = {i: label for label, i in label_to_id.items()}
 
-train_df['label_id'] = train_df['technique'].map(label_to_id)
-dev_df['label_id'] = dev_df['technique'].map(label_to_id)
-
-# 📦 Convert to Hugging Face datasets
+# 📦 Tokenizer
 tokenizer = BertTokenizerFast.from_pretrained("bert-base-uncased")
 
-def tokenize_function(example):
-    return tokenizer(example["text"], truncation=True, padding='max_length', max_length=128)
+def encode_articles(df):
+    grouped = df.groupby("full_text")
+    features = []
 
-train_dataset = Dataset.from_pandas(train_df[['text', 'label_id']].dropna()).map(tokenize_function, batched=True)
-dev_dataset = Dataset.from_pandas(dev_df[['text', 'label_id']].dropna()).map(tokenize_function, batched=True)
+    for full_text, group in grouped:
+        encoding = tokenizer(full_text, return_offsets_mapping=True, truncation=True, padding="max_length", max_length=512)
+        offsets = encoding["offset_mapping"]
+        labels = [0] * len(offsets)
 
-train_dataset = train_dataset.rename_column("label_id", "labels")
-dev_dataset = dev_dataset.rename_column("label_id", "labels")
-train_dataset.set_format("torch", columns=["input_ids", "attention_mask", "labels"])
-dev_dataset.set_format("torch", columns=["input_ids", "attention_mask", "labels"])
+        for _, row in group.iterrows():
+            for idx, (start, end) in enumerate(offsets):
+                if start < row.end and end > row.start:
+                    labels[idx] = label_to_id.get(row.label, 0)
+
+        # 🔎 Debug how many non-O labels per article
+        print(f"\u2192 {sum(1 for l in labels if l != 0)} tokens labeled in article")
+
+        encoding["labels"] = labels
+        encoding.pop("offset_mapping")
+        features.append(encoding)
+
+    return Dataset.from_list(features)
+
+print("\U0001F501 Tokenizing and aligning labels...")
+train_dataset = encode_articles(train_df)
+dev_dataset = encode_articles(dev_df)
+
+# ⚖️ Class weights
+all_labels = []
+for labels in train_dataset["labels"]:
+    all_labels.extend([l for l in labels if l != 0])  # Exclude 'O' from weight calc
+
+existing_classes = np.unique(all_labels)
+computed_weights = compute_class_weight(class_weight='balanced', classes=existing_classes, y=all_labels)
+class_weights = np.ones(len(label_list), dtype=np.float32)
+for i, cls in enumerate(existing_classes):
+    class_weights[cls] = computed_weights[i]
+class_weights = torch.tensor(class_weights, dtype=torch.float)
 
 # 🤖 Load model
-model = BertForSequenceClassification.from_pretrained("bert-base-uncased", num_labels=len(label_list))
+config = BertConfig.from_pretrained("bert-base-uncased", num_labels=len(label_list))
+model = CustomBertForTokenClassification(config, class_weights=class_weights)
 
-# ⚙️ Training arguments
+# ⚙️ Training args
 training_args = TrainingArguments(
     output_dir="./bert_prop_model",
     evaluation_strategy="epoch",
     logging_strategy="epoch",
     save_strategy="epoch",
     learning_rate=2e-5,
-    per_device_train_batch_size=16,
-    per_device_eval_batch_size=16,
-    num_train_epochs=8,  # 🔁 More epochs
+    per_device_train_batch_size=8,
+    per_device_eval_batch_size=8,
+    num_train_epochs=12,
     weight_decay=0.01,
     load_best_model_at_end=True,
     metric_for_best_model="eval_loss",
@@ -91,15 +119,13 @@ trainer = Trainer(
     tokenizer=tokenizer,
 )
 
-# 🚀 Train
 trainer.train()
 
 # 📊 Evaluate
 eval_results = trainer.evaluate()
-print("\n📈 Evaluation Results:")
-print(eval_results)
+print("\n\U0001F4C8 Evaluation Results:", eval_results)
 
-# 💾 Save model and tokenizer
+# 💾 Save
 model.save_pretrained("bert_prop_model")
 tokenizer.save_pretrained("bert_prop_model")
-print("✅ Fine-tuned BERT model saved to 'bert_prop_model'")
+print("\u2705 Model and tokenizer saved to 'bert_prop_model'")

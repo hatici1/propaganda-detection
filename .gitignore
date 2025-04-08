@@ -6,3 +6,6 @@ __pycache__/
 *.tsv
 bert_prop_model/
 .ipynb_checkpoints/
+*.log
+*.zip
+logs/
